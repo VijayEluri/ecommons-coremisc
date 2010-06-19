@@ -989,8 +989,7 @@ public abstract class IndexReader implements Cloneable,Closeable {
     hasChanges = false;
   }
 
-  /** Implements commit.  NOTE: subclasses should override
-   *  this.  In 3.0 this will become an abstract method. */
+  /** Implements commit.  */
   protected abstract void doCommit(Map<String, String> commitUserData) throws IOException;
 
   /**
@@ -1147,6 +1146,12 @@ public abstract class IndexReader implements Cloneable,Closeable {
 
   /** Expert */
   public Object getFieldCacheKey() {
+    return this;
+  }
+
+  /** Expert.  Warning: this returns null if the reader has
+   *  no deletions */
+  public Object getDeletesCacheKey() {
     return this;
   }
 

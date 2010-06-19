@@ -37,6 +37,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.BitVector;
 import org.apache.lucene.util.CloseableThreadLocal;
+import org.apache.lucene.search.FieldCache; // not great (circular); used only to purge FieldCache entry on close
 
 /** @version $Id */
 /**
@@ -92,13 +93,15 @@ public class SegmentReader extends IndexReader implements Cloneable {
     final int readBufferSize;
     final int termsIndexDivisor;
 
+    private final SegmentReader origInstance;
+
     TermInfosReader tis;
     FieldsReader fieldsReaderOrig;
     TermVectorsReader termVectorsReaderOrig;
     CompoundFileReader cfsReader;
     CompoundFileReader storeCFSReader;
 
-    CoreReaders(Directory dir, SegmentInfo si, int readBufferSize, int termsIndexDivisor) throws IOException {
+    CoreReaders(SegmentReader origInstance, Directory dir, SegmentInfo si, int readBufferSize, int termsIndexDivisor) throws IOException {
       segment = si.name;
       this.readBufferSize = readBufferSize;
       this.dir = dir;
@@ -139,6 +142,12 @@ public class SegmentReader extends IndexReader implements Cloneable {
           decRef();
         }
       }
+
+      // Must assign this at the end -- if we hit an
+      // exception above core, we don't want to attempt to
+      // purge the FieldCache (will hit NPE because core is
+      // not assigned yet).
+      this.origInstance = origInstance;
     }
 
     synchronized TermVectorsReader getTermVectorsReaderOrig() {
@@ -231,6 +240,11 @@ public class SegmentReader extends IndexReader implements Cloneable {
   
         if (storeCFSReader != null) {
           storeCFSReader.close();
+        }
+
+        // Force FieldCache to evict our entries at this point
+        if (origInstance != null) {
+          FieldCache.DEFAULT.purge(origInstance);
         }
       }
     }
@@ -573,7 +587,7 @@ public class SegmentReader extends IndexReader implements Cloneable {
     boolean success = false;
 
     try {
-      instance.core = new CoreReaders(dir, si, readBufferSize, termInfosIndexDivisor);
+      instance.core = new CoreReaders(instance, dir, si, readBufferSize, termInfosIndexDivisor);
       if (doOpenStores) {
         instance.core.openDocStores(si);
       }
@@ -598,20 +612,28 @@ public class SegmentReader extends IndexReader implements Cloneable {
     core.openDocStores(si);
   }
 
+  private boolean checkDeletedCounts() throws IOException {
+    final int recomputedCount = deletedDocs.getRecomputedCount();
+     
+    assert deletedDocs.count() == recomputedCount : "deleted count=" + deletedDocs.count() + " vs recomputed count=" + recomputedCount;
+
+    assert si.getDelCount() == recomputedCount : 
+    "delete count mismatch: info=" + si.getDelCount() + " vs BitVector=" + recomputedCount;
+
+    // Verify # deletes does not exceed maxDoc for this
+    // segment:
+    assert si.getDelCount() <= maxDoc() : 
+    "delete count mismatch: " + recomputedCount + ") exceeds max doc (" + maxDoc() + ") for segment " + si.name;
+
+    return true;
+  }
+
   private void loadDeletedDocs() throws IOException {
     // NOTE: the bitvector is stored using the regular directory, not cfs
     if (hasDeletions(si)) {
       deletedDocs = new BitVector(directory(), si.getDelFileName());
       deletedDocsRef = new Ref();
-     
-      assert si.getDelCount() == deletedDocs.count() : 
-        "delete count mismatch: info=" + si.getDelCount() + " vs BitVector=" + deletedDocs.count();
-
-      // Verify # deletes does not exceed maxDoc for this
-      // segment:
-      assert si.getDelCount() <= maxDoc() : 
-        "delete count mismatch: " + deletedDocs.count() + ") exceeds max doc (" + maxDoc() + ") for segment " + si.name;
-
+      assert checkDeletedCounts();
     } else
       assert si.getDelCount() == 0;
   }
@@ -1253,6 +1275,11 @@ public class SegmentReader extends IndexReader implements Cloneable {
   @Override
   public final Object getFieldCacheKey() {
     return core.freqStream;
+  }
+
+  @Override
+  public Object getDeletesCacheKey() {
+    return deletedDocs;
   }
 
   @Override

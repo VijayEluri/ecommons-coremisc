@@ -296,6 +296,8 @@ public class IndexWriter implements Closeable {
   private Thread writeThread;                     // non-null if any thread holds write lock
   final ReaderPool readerPool = new ReaderPool();
   private int upgradeCount;
+
+  private int readerTermsIndexDivisor = IndexReader.DEFAULT_TERMS_INDEX_DIVISOR;
   
   // This is a "write once" variable (like the organic dye
   // on a DVD-R that may or may not be heated by a laser and
@@ -369,7 +371,7 @@ public class IndexWriter implements Closeable {
    * @throws IOException
    */
   public IndexReader getReader() throws IOException {
-    return getReader(IndexReader.DEFAULT_TERMS_INDEX_DIVISOR);
+    return getReader(readerTermsIndexDivisor);
   }
 
   /** Expert: like {@link #getReader}, except you can
@@ -386,6 +388,9 @@ public class IndexWriter implements Closeable {
    *  loading a TermInfo.  The default value is 1.  Set this
    *  to -1 to skip loading the terms index entirely. */
   public IndexReader getReader(int termInfosIndexDivisor) throws IOException {
+
+    ensureOpen();
+
     if (infoStream != null) {
       message("flush at getReader");
     }
@@ -471,7 +476,8 @@ public class IndexWriter implements Closeable {
 
       assert !pooled | readerMap.get(sr.getSegmentInfo()) == sr;
 
-      // Drop caller's ref
+      // Drop caller's ref; for an external reader (not
+      // pooled), this decRef will close it
       sr.decRef();
 
       if (pooled && (drop || (!poolReaders && sr.getRefCount() == 1))) {
@@ -582,8 +588,9 @@ public class IndexWriter implements Closeable {
      * @throws IOException
      */
     public synchronized SegmentReader get(SegmentInfo info, boolean doOpenStores) throws IOException {
-      return get(info, doOpenStores, BufferedIndexInput.BUFFER_SIZE, IndexReader.DEFAULT_TERMS_INDEX_DIVISOR);
+      return get(info, doOpenStores, BufferedIndexInput.BUFFER_SIZE, readerTermsIndexDivisor);
     }
+
     /**
      * Obtain a SegmentReader from the readerPool.  The reader
      * must be returned by calling {@link #release(SegmentReader)}
@@ -607,7 +614,11 @@ public class IndexWriter implements Closeable {
         // synchronized
         // Returns a ref, which we xfer to readerMap:
         sr = SegmentReader.get(false, info.dir, info, readBufferSize, doOpenStores, termsIndexDivisor);
-        readerMap.put(info, sr);
+
+        if (info.dir == directory) {
+          // Only pool if reader is not external
+          readerMap.put(info, sr);
+        }
       } else {
         if (doOpenStores) {
           sr.openDocStores();
@@ -624,7 +635,10 @@ public class IndexWriter implements Closeable {
       }
 
       // Return a ref to our caller
-      sr.incRef();
+      if (info.dir == directory) {
+        // Only incRef if we pooled (reader is not external)
+        sr.incRef();
+      }
       return sr;
     }
 
@@ -1042,9 +1056,12 @@ public class IndexWriter implements Closeable {
     }
 
     Lock writeLock = directory.makeLock(WRITE_LOCK_NAME);
+
     if (!writeLock.obtain(writeLockTimeout)) // obtain write lock
       throw new LockObtainFailedException("Index locked for write: " + writeLock);
     this.writeLock = writeLock;                   // save it
+
+    boolean success = false;
 
     try {
       if (create) {
@@ -1122,10 +1139,20 @@ public class IndexWriter implements Closeable {
         messageState();
       }
 
-    } catch (IOException e) {
-      this.writeLock.release();
-      this.writeLock = null;
-      throw e;
+      success = true;
+
+    } finally {
+      if (!success) {
+        if (infoStream != null) {
+          message("init: hit exception on init; releasing write lock");
+        }
+        try {
+          writeLock.release();
+        } catch (Throwable t) {
+          // don't mask the original exception
+        }
+        writeLock = null;
+      }
     }
   }
 
@@ -1259,6 +1286,28 @@ public class IndexWriter implements Closeable {
   public int getMaxFieldLength() {
     ensureOpen();
     return maxFieldLength;
+  }
+
+  /** Sets the termsIndexDivisor passed to any readers that
+   *  IndexWriter opens, for example when applying deletes
+   *  or creating a near-real-time reader in {@link
+   *  IndexWriter#getReader}.  Default value is {@link
+   *  IndexReader#DEFAULT_TERMS_INDEX_DIVISOR}. */
+  public void setReaderTermsIndexDivisor(int divisor) {
+    ensureOpen();
+    if (divisor <= 0) {
+      throw new IllegalArgumentException("divisor must be >= 1 (got " + divisor + ")");
+    }
+    readerTermsIndexDivisor = divisor;
+    if (infoStream != null) {
+      message("setReaderTermsIndexDivisor " + readerTermsIndexDivisor);
+    }
+  }
+
+  /** @see #setReaderTermsIndexDivisor() */
+  public int getReaderTermsIndexDivisor() {
+    ensureOpen();
+    return readerTermsIndexDivisor;
   }
 
   /** Determines the minimal number of documents required
@@ -3312,12 +3361,18 @@ public class IndexWriter implements Closeable {
     }
   }
 
-  // This is called after pending added and deleted
-  // documents have been flushed to the Directory but before
-  // the change is committed (new segments_N file written).
-  void doAfterFlush()
-    throws IOException {
-  }
+  /**
+   * A hook for extending classes to execute operations after pending added and
+   * deleted documents have been flushed to the Directory but before the change
+   * is committed (new segments_N file written).
+   */
+  protected void doAfterFlush() throws IOException {}
+
+  /**
+   * A hook for extending classes to execute operations before pending added and
+   * deleted documents are flushed to the Directory.
+   */
+  protected void doBeforeFlush() throws IOException {}
 
   /** Expert: prepare for commit.
    *
@@ -3506,7 +3561,13 @@ public class IndexWriter implements Closeable {
   // even while a flush is happening
   private synchronized final boolean doFlush(boolean flushDocStores, boolean flushDeletes) throws CorruptIndexException, IOException {
     try {
-      return doFlushInternal(flushDocStores, flushDeletes);
+      try {
+        return doFlushInternal(flushDocStores, flushDeletes);
+      } finally {
+        if (docWriter.doBalanceRAM()) {
+          docWriter.balanceRAM();
+        }
+      }
     } finally {
       docWriter.clearFlushPending();
     }
@@ -3525,6 +3586,8 @@ public class IndexWriter implements Closeable {
 
     assert testPoint("startDoFlush");
 
+    doBeforeFlush();
+    
     flushCount++;
 
     // If we are flushing because too many deletes
@@ -3535,6 +3598,9 @@ public class IndexWriter implements Closeable {
     // Make sure no threads are actively adding a document.
     // Returns true if docWriter is currently aborting, in
     // which case we skip flushing this segment
+    if (infoStream != null) {
+      message("flush: now pause all indexing threads");
+    }
     if (docWriter.pauseAllThreads()) {
       docWriter.resumeAllThreads();
       return false;
@@ -3820,25 +3886,7 @@ public class IndexWriter implements Closeable {
     commitMergedDeletes(merge, mergedReader);
     docWriter.remapDeletes(segmentInfos, merger.getDocMaps(), merger.getDelCounts(), merge, mergedDocCount);
       
-    // Simple optimization: if the doc store we are using
-    // has been closed and is in now compound format (but
-    // wasn't when we started), then we will switch to the
-    // compound format as well:
-    final String mergeDocStoreSegment = merge.info.getDocStoreSegment(); 
-    if (mergeDocStoreSegment != null && !merge.info.getDocStoreIsCompoundFile()) {
-      final int size = segmentInfos.size();
-      for(int i=0;i<size;i++) {
-        final SegmentInfo info = segmentInfos.info(i);
-        final String docStoreSegment = info.getDocStoreSegment();
-        if (docStoreSegment != null &&
-            docStoreSegment.equals(mergeDocStoreSegment) && 
-            info.getDocStoreIsCompoundFile()) {
-          merge.info.setDocStoreIsCompoundFile(true);
-          break;
-        }
-      }
-    }
-
+    setMergeDocStoreIsCompoundFile(merge);
     merge.info.setHasProx(merger.hasProx());
 
     segmentInfos.subList(start, start + merge.segments.size()).clear();
@@ -4181,6 +4229,11 @@ public class IndexWriter implements Closeable {
     if (merge.increfDone)
       decrefMergeSegments(merge);
 
+    if (merge.mergeFiles != null) {
+      deleter.decRef(merge.mergeFiles);
+      merge.mergeFiles = null;
+    }
+
     // It's possible we are called twice, eg if there was an
     // exception inside mergeInit
     if (merge.registerDone) {
@@ -4194,6 +4247,23 @@ public class IndexWriter implements Closeable {
 
     runningMerges.remove(merge);
   }
+
+  private synchronized void setMergeDocStoreIsCompoundFile(MergePolicy.OneMerge merge) {
+    final String mergeDocStoreSegment = merge.info.getDocStoreSegment(); 
+    if (mergeDocStoreSegment != null && !merge.info.getDocStoreIsCompoundFile()) {
+      final int size = segmentInfos.size();
+      for(int i=0;i<size;i++) {
+        final SegmentInfo info = segmentInfos.info(i);
+        final String docStoreSegment = info.getDocStoreSegment();
+        if (docStoreSegment != null &&
+            docStoreSegment.equals(mergeDocStoreSegment) && 
+            info.getDocStoreIsCompoundFile()) {
+          merge.info.setDocStoreIsCompoundFile(true);
+          break;
+        }
+      }
+    }
+  }        
 
   /** Does the actual (time-consuming) work of the merge,
    *  but without holding synchronized lock on IndexWriter
@@ -4294,7 +4364,32 @@ public class IndexWriter implements Closeable {
       // keep deletes (it's costly to open entire reader
       // when we just need deletes)
 
-      final SegmentReader mergedReader = readerPool.get(merge.info, false, BufferedIndexInput.BUFFER_SIZE, -1);
+      final int termsIndexDivisor;
+      final boolean loadDocStores;
+
+      synchronized(this) {
+        // If the doc store we are using has been closed and
+        // is in now compound format (but wasn't when we
+        // started), then we will switch to the compound
+        // format as well:
+        setMergeDocStoreIsCompoundFile(merge);
+        assert merge.mergeFiles == null;
+        merge.mergeFiles = merge.info.files();
+        deleter.incRef(merge.mergeFiles);
+      }
+
+      if (poolReaders && mergedSegmentWarmer != null) {
+        // Load terms index & doc stores so the segment
+        // warmer can run searches, load documents/term
+        // vectors
+        termsIndexDivisor = readerTermsIndexDivisor;
+        loadDocStores = true;
+      } else {
+        termsIndexDivisor = -1;
+        loadDocStores = false;
+      }
+
+      final SegmentReader mergedReader = readerPool.get(merge.info, loadDocStores, BufferedIndexInput.BUFFER_SIZE, termsIndexDivisor);
       try {
         if (poolReaders && mergedSegmentWarmer != null) {
           mergedSegmentWarmer.warm(mergedReader);
