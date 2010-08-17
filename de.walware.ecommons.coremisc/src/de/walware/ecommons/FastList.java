@@ -61,13 +61,14 @@ public final class FastList<T> {
 	 */
 	public static final int IDENTITY = 1;
 	
+	
 	/**
 	 * Indicates the comparison mode used to determine if two
 	 * items are equivalent
 	 */
 	private final boolean identity;
 	
-	private final Class type;
+	private final Class<T> type;
 	private final T[] emptyArray;
 	
 	/**
@@ -81,7 +82,7 @@ public final class FastList<T> {
 	/**
 	 * Creates a item list in which items are compared using equality.
 	 */
-	public FastList(final Class type) {
+	public FastList(final Class<T> type) {
 		this(type, EQUALITY, null);
 	}
 	
@@ -90,7 +91,7 @@ public final class FastList<T> {
 	 * 
 	 * @param mode The mode used to determine if items are the <a href="#same">same</a>.
 	 */
-	public FastList(final Class type, final int mode) {
+	public FastList(final Class<T> type, final int mode) {
 		this(type, mode, null);
 	}
 	
@@ -101,7 +102,7 @@ public final class FastList<T> {
 	 * @param mode The mode used to determine if items are the <a href="#same">same</a>
 	 * @param initial array with the initial items, the array is used directly
 	 */
-	public FastList(final Class type, final int mode, final T[] initial) {
+	public FastList(final Class<T> type, final int mode, final T[] initial) {
 		if (mode != EQUALITY && mode != IDENTITY) {
 			throw new IllegalArgumentException();
 		}
