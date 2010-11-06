@@ -16,7 +16,6 @@ import java.net.BindException;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.UnknownHostException;
-import java.rmi.AccessException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -272,7 +271,6 @@ public class RMIUtil {
 			}
 			return new Status(IStatus.INFO, ECommons.PLUGIN_ID, MessageFormat.format(Messages.RMI_status_RegistryAlreadyStarted_message, address.getPort()));
 		}
-		catch (final AccessException e) {}
 		catch (final RemoteException e) {}
 		final Process process;
 		try {
@@ -283,7 +281,7 @@ public class RMIUtil {
 			return new Status(IStatus.ERROR, ECommons.PLUGIN_ID, MessageFormat.format(Messages.RMI_status_RegistryStartFailed_message, address.getPort()), e);
 		}
 		RemoteException lastException = null;
-		for (int i = 0; i < 20; i++) {
+		for (int i = 0; i < 25; i++) {
 			try {
 				final int exit = process.exitValue();
 				return new Status(IStatus.ERROR, ECommons.PLUGIN_ID, MessageFormat.format(Messages.RMI_status_RegistryStartFailedWithExitValue_message, address.getPort(), exit));
@@ -301,15 +299,14 @@ public class RMIUtil {
 				}
 				return Status.OK_STATUS;
 			}
-			catch (final AccessException e) {}
 			catch (final RemoteException e) {
 				lastException = e;
 			}
 			try {
 				Thread.sleep(50);
+				continue;
 			}
 			catch (final InterruptedException e) {
-				Thread.interrupted();
 			}
 		}
 		return new Status(IStatus.ERROR, ECommons.PLUGIN_ID, MessageFormat.format(Messages.RMI_status_RegistryStartFailed_message, address.getPort()), lastException);
