@@ -23,7 +23,9 @@ import java.io.IOException;
 import java.io.FileNotFoundException;
 import java.io.PrintStream;
 import java.util.Map;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.Set;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -99,6 +101,9 @@ final class IndexFileDeleter {
   private DocumentsWriter docWriter;
 
   final boolean startingCommitDeleted;
+  private SegmentInfos lastSegmentInfos;
+
+  private final Set<String> synced;
 
   /** Change to true to see details of reference counts when
    *  infoStream != null */
@@ -111,7 +116,7 @@ final class IndexFileDeleter {
   }
   
   private void message(String message) {
-    infoStream.println("IFD [" + Thread.currentThread().getName() + "]: " + message);
+    infoStream.println("IFD [" + new Date() + "; " + Thread.currentThread().getName() + "]: " + message);
   }
 
   /**
@@ -122,11 +127,12 @@ final class IndexFileDeleter {
    * @throws CorruptIndexException if the index is corrupt
    * @throws IOException if there is a low-level IO error
    */
-  public IndexFileDeleter(Directory directory, IndexDeletionPolicy policy, SegmentInfos segmentInfos, PrintStream infoStream, DocumentsWriter docWriter)
+  public IndexFileDeleter(Directory directory, IndexDeletionPolicy policy, SegmentInfos segmentInfos, PrintStream infoStream, DocumentsWriter docWriter, Set<String> synced)
     throws CorruptIndexException, IOException {
 
     this.docWriter = docWriter;
     this.infoStream = infoStream;
+    this.synced = synced;
 
     if (infoStream != null)
       message("init: current segments file is \"" + segmentInfos.getCurrentSegmentFileName() + "\"; deletionPolicy=" + policy);
@@ -157,33 +163,44 @@ final class IndexFileDeleter {
           // This is a commit (segments or segments_N), and
           // it's valid (<= the max gen).  Load it, then
           // incref all files it refers to:
-          if (SegmentInfos.generationFromSegmentsFileName(fileName) <= currentGen) {
+          if (infoStream != null) {
+            message("init: load commit \"" + fileName + "\"");
+          }
+          SegmentInfos sis = new SegmentInfos();
+          try {
+            sis.read(directory, fileName);
+          } catch (FileNotFoundException e) {
+            // LUCENE-948: on NFS (and maybe others), if
+            // you have writers switching back and forth
+            // between machines, it's very likely that the
+            // dir listing will be stale and will claim a
+            // file segments_X exists when in fact it
+            // doesn't.  So, we catch this and handle it
+            // as if the file does not exist
             if (infoStream != null) {
-              message("init: load commit \"" + fileName + "\"");
+              message("init: hit FileNotFoundException when loading commit \"" + fileName + "\"; skipping this commit point");
             }
-            SegmentInfos sis = new SegmentInfos();
-            try {
-              sis.read(directory, fileName);
-            } catch (FileNotFoundException e) {
-              // LUCENE-948: on NFS (and maybe others), if
-              // you have writers switching back and forth
-              // between machines, it's very likely that the
-              // dir listing will be stale and will claim a
-              // file segments_X exists when in fact it
-              // doesn't.  So, we catch this and handle it
-              // as if the file does not exist
-              if (infoStream != null) {
-                message("init: hit FileNotFoundException when loading commit \"" + fileName + "\"; skipping this commit point");
-              }
+            sis = null;
+          } catch (IOException e) {
+            if (SegmentInfos.generationFromSegmentsFileName(fileName) <= currentGen) {
+              throw e;
+            } else {
+              // Most likely we are opening an index that
+              // has an aborted "future" commit, so suppress
+              // exc in this case
               sis = null;
             }
-            if (sis != null) {
-              CommitPoint commitPoint = new CommitPoint(commitsToDelete, directory, sis);
-              if (sis.getGeneration() == segmentInfos.getGeneration()) {
-                currentCommitPoint = commitPoint;
-              }
-              commits.add(commitPoint);
-              incRef(sis, true);
+          }
+          if (sis != null) {
+            CommitPoint commitPoint = new CommitPoint(commitsToDelete, directory, sis);
+            if (sis.getGeneration() == segmentInfos.getGeneration()) {
+              currentCommitPoint = commitPoint;
+            }
+            commits.add(commitPoint);
+            incRef(sis, true);
+
+            if (lastSegmentInfos == null || sis.getGeneration() > lastSegmentInfos.getGeneration()) {
+              lastSegmentInfos = sis;
             }
           }
         }
@@ -239,6 +256,10 @@ final class IndexFileDeleter {
     startingCommitDeleted = currentCommitPoint.isDeleted();
 
     deleteCommits();
+  }
+
+  public SegmentInfos getLastSegmentInfos() {
+    return lastSegmentInfos;
   }
 
   /**
@@ -460,12 +481,26 @@ final class IndexFileDeleter {
       // commit points nor by the in-memory SegmentInfos:
       deleteFile(fileName);
       refCounts.remove(fileName);
+
+      if (synced != null) {
+        synchronized(synced) {
+          synced.remove(fileName);
+        }
+      }
     }
   }
 
   void decRef(SegmentInfos segmentInfos) throws IOException {
     for (final String file : segmentInfos.files(directory, false)) {
       decRef(file);
+    }
+  }
+
+  public boolean exists(String fileName) {
+    if (!refCounts.containsKey(fileName)) {
+      return false;
+    } else {
+      return getRefCount(fileName).count > 0;
     }
   }
 
@@ -489,8 +524,12 @@ final class IndexFileDeleter {
    *  (have not yet been incref'd). */
   void deleteNewFiles(Collection<String> files) throws IOException {
     for (final String fileName: files) {
-      if (!refCounts.containsKey(fileName))
+      if (!refCounts.containsKey(fileName)) {
+        if (infoStream != null) {
+          message("delete new file \"" + fileName + "\"");
+        }
         deleteFile(fileName);
+      }
     }
   }
 
@@ -583,6 +622,11 @@ final class IndexFileDeleter {
       isOptimized = segmentInfos.size() == 1 && !segmentInfos.info(0).hasDeletions();
 
       assert !segmentInfos.hasExternalSegments(directory);
+    }
+
+    @Override
+    public String toString() {
+      return "IndexFileDeleter.CommitPoint(" + segmentsFileName + ")";
     }
 
     @Override

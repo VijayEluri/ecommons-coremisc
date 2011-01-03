@@ -22,6 +22,7 @@ import java.io.File;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.BufferUnderflowException;
+import java.nio.channels.ClosedChannelException; // javadoc @link
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
 
@@ -68,6 +69,13 @@ import org.apache.lucene.util.Constants;
  * an undocumented internal cleanup functionality.
  * {@link #UNMAP_SUPPORTED} is <code>true</code>, if the workaround
  * can be enabled (with no guarantees).
+ * <p>
+ * <b>NOTE:</b> Accessing this class either directly or
+ * indirectly from a thread while it's interrupted can close the
+ * underlying channel immediately if at the same time the thread is
+ * blocked on IO. The channel will remain closed and subsequent access
+ * to {@link MMapDirectory} will throw a {@link ClosedChannelException}. 
+ * </p>
  */
 public class MMapDirectory extends FSDirectory {
 
@@ -237,6 +245,8 @@ public class MMapDirectory extends FSDirectory {
 
     @Override
     public Object clone() {
+      if (buffer == null)
+        throw new AlreadyClosedException("MMapIndexInput already closed");
       MMapIndexInput clone = (MMapIndexInput)super.clone();
       clone.isClone = true;
       clone.buffer = buffer.duplicate();
@@ -245,9 +255,9 @@ public class MMapDirectory extends FSDirectory {
 
     @Override
     public void close() throws IOException {
-      if (isClone || buffer == null) return;
       // unmap the buffer (if enabled) and at least unset it for GC
       try {
+        if (isClone || buffer == null) return;
         cleanMapping(buffer);
       } finally {
         buffer = null;
@@ -288,7 +298,7 @@ public class MMapDirectory extends FSDirectory {
            + raf.toString());
       
       int nrBuffers = (int) (length / maxBufSize);
-      if (((long) nrBuffers * maxBufSize) < length) nrBuffers++;
+      if (((long) nrBuffers * maxBufSize) <= length) nrBuffers++;
       
       this.buffers = new ByteBuffer[nrBuffers];
       this.bufSizes = new int[nrBuffers];
@@ -360,6 +370,8 @@ public class MMapDirectory extends FSDirectory {
   
     @Override
     public Object clone() {
+      if (buffers == null)
+        throw new AlreadyClosedException("MultiMMapIndexInput already closed");
       MultiMMapIndexInput clone = (MultiMMapIndexInput)super.clone();
       clone.isClone = true;
       clone.buffers = new ByteBuffer[buffers.length];
@@ -381,8 +393,8 @@ public class MMapDirectory extends FSDirectory {
   
     @Override
     public void close() throws IOException {
-      if (isClone || buffers == null) return;
       try {
+        if (isClone || buffers == null) return;
         for (int bufNr = 0; bufNr < buffers.length; bufNr++) {
           // unmap the buffer (if enabled) and at least unset it for GC
           try {

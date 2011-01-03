@@ -55,7 +55,6 @@ class DirectoryReader extends IndexReader implements Cloneable {
   private final int termInfosIndexDivisor;
 
   private boolean rollbackHasChanges;
-  private SegmentInfos rollbackSegmentInfos;
 
   private SegmentReader[] subReaders;
   private int[] starts;                           // 1st docno for each segment
@@ -63,6 +62,11 @@ class DirectoryReader extends IndexReader implements Cloneable {
   private int maxDoc = 0;
   private int numDocs = -1;
   private boolean hasDeletions = false;
+
+  // Max version in index as of when we opened; this can be
+  // > our current segmentInfos version in case we were
+  // opened on a past IndexCommit:
+  private long maxIndexVersion;
 
   static IndexReader open(final Directory directory, final IndexDeletionPolicy deletionPolicy, final IndexCommit commit, final boolean readOnly,
                           final int termInfosIndexDivisor) throws CorruptIndexException, IOException {
@@ -299,7 +303,7 @@ class DirectoryReader extends IndexReader implements Cloneable {
     }
   }
 
-  private void initialize(SegmentReader[] subReaders) {
+  private void initialize(SegmentReader[] subReaders) throws IOException {
     this.subReaders = subReaders;
     starts = new int[subReaders.length + 1];    // build starts array
     for (int i = 0; i < subReaders.length; i++) {
@@ -310,6 +314,10 @@ class DirectoryReader extends IndexReader implements Cloneable {
         hasDeletions = true;
     }
     starts[subReaders.length] = maxDoc;
+
+    if (!readOnly) {
+      maxIndexVersion = SegmentInfos.readCurrentVersion(directory);
+    }
   }
 
   @Override
@@ -697,8 +705,9 @@ class DirectoryReader extends IndexReader implements Cloneable {
         this.writeLock = writeLock;
 
         // we have to check whether index has changed since this reader was opened.
-        // if so, this reader is no longer valid for deletion
-        if (SegmentInfos.readCurrentVersion(directory) > segmentInfos.getVersion()) {
+        // if so, this reader is no longer valid for
+        // deletion
+        if (SegmentInfos.readCurrentVersion(directory) > maxIndexVersion) {
           stale = true;
           this.writeLock.release();
           this.writeLock = null;
@@ -724,7 +733,8 @@ class DirectoryReader extends IndexReader implements Cloneable {
       // KeepOnlyLastCommitDeleter:
       IndexFileDeleter deleter = new IndexFileDeleter(directory,
                                                       deletionPolicy == null ? new KeepOnlyLastCommitDeletionPolicy() : deletionPolicy,
-                                                      segmentInfos, null, null);
+                                                      segmentInfos, null, null, synced);
+      segmentInfos.updateGeneration(deleter.getLastSegmentInfos());
 
       // Checkpoint the state we are about to change, in
       // case we have to roll back:
@@ -770,6 +780,8 @@ class DirectoryReader extends IndexReader implements Cloneable {
       deleter.checkpoint(segmentInfos, true);
       deleter.close();
 
+      maxIndexVersion = segmentInfos.getVersion();
+
       if (writeLock != null) {
         writeLock.release();  // release write lock
         writeLock = null;
@@ -780,7 +792,6 @@ class DirectoryReader extends IndexReader implements Cloneable {
 
   void startCommit() {
     rollbackHasChanges = hasChanges;
-    rollbackSegmentInfos = (SegmentInfos) segmentInfos.clone();
     for (int i = 0; i < subReaders.length; i++) {
       subReaders[i].startCommit();
     }
@@ -788,14 +799,6 @@ class DirectoryReader extends IndexReader implements Cloneable {
 
   void rollbackCommit() {
     hasChanges = rollbackHasChanges;
-    for (int i = 0; i < segmentInfos.size(); i++) {
-      // Rollback each segmentInfo.  Because the
-      // SegmentReader holds a reference to the
-      // SegmentInfo we can't [easily] just replace
-      // segmentInfos, so we reset it in place instead:
-      segmentInfos.info(i).reset(rollbackSegmentInfos.info(i));
-    }
-    rollbackSegmentInfos = null;
     for (int i = 0; i < subReaders.length; i++) {
       subReaders[i].rollbackCommit();
     }
@@ -946,6 +949,11 @@ class DirectoryReader extends IndexReader implements Cloneable {
       version = infos.getVersion();
       generation = infos.getGeneration();
       isOptimized = infos.size() == 1 && !infos.info(0).hasDeletions();
+    }
+
+    @Override
+    public String toString() {
+      return "DirectoryReader.ReaderCommit(" + segmentsFileName + ")";
     }
 
     @Override

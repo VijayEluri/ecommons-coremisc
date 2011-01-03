@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
 import org.apache.lucene.document.MapFieldSelector;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.vectorhighlight.FieldFragList.WeightedFragInfo;
@@ -35,7 +36,10 @@ public abstract class BaseFragmentsBuilder implements FragmentsBuilder {
     "<b style=\"background:yellow\">", "<b style=\"background:lawngreen\">", "<b style=\"background:aquamarine\">",
     "<b style=\"background:magenta\">", "<b style=\"background:palegreen\">", "<b style=\"background:coral\">",
     "<b style=\"background:wheat\">", "<b style=\"background:khaki\">", "<b style=\"background:lime\">",
-    "<b style=\"background:deepskyblue\">"
+    "<b style=\"background:deepskyblue\">", "<b style=\"background:deeppink\">", "<b style=\"background:salmon\">",
+    "<b style=\"background:peachpuff\">", "<b style=\"background:violet\">", "<b style=\"background:mediumpurple\">",
+    "<b style=\"background:palegoldenrod\">", "<b style=\"background:darkkhaki\">", "<b style=\"background:springgreen\">",
+    "<b style=\"background:turquoise\">", "<b style=\"background:powderblue\">"
   };
   
   
@@ -68,7 +72,7 @@ public abstract class BaseFragmentsBuilder implements FragmentsBuilder {
     final List<WeightedFragInfo> fragInfos = getWeightedFragInfoList( fieldFragList.fragInfos );
     
     final List<String> fragments = new ArrayList<String>( maxNumFragments );
-    final String[] values = getFieldValues( reader, docId, fieldName );
+    final Field[] values = getFields( reader, docId, fieldName );
     if( values.length == 0 ) return null;
     final StringBuilder buffer = new StringBuilder();
     final int[] nextValueIndex = { 0 };
@@ -79,40 +83,27 @@ public abstract class BaseFragmentsBuilder implements FragmentsBuilder {
     return fragments.toArray( new String[fragments.size()] );
   }
   
-  protected String[] getFieldValues( final IndexReader reader, final int docId, final String fieldName) throws IOException {
-    final Document doc = reader.document( docId, new MapFieldSelector( new String[]{ fieldName } ) );
-    return doc.getValues( fieldName ); // according to Document class javadoc, this never returns null
+  protected Field[] getFields( IndexReader reader, int docId, String fieldName) throws IOException {
+    // according to javadoc, doc.getFields(fieldName) cannot be used with lazy loaded field???
+    Document doc = reader.document( docId, new MapFieldSelector( new String[]{ fieldName } ) );
+    return doc.getFields( fieldName ); // according to Document class javadoc, this never returns null
   }
 
-//  protected String makeFragment( final StringBuilder buffer, final int[] index, final String[] values, final WeightedFragInfo fragInfo ){
-//    final StringBuilder fragment = new StringBuilder();
-//    final int s = fragInfo.startOffset;
-//    final String src = getFragmentSource( buffer, index, values, s, fragInfo.endOffset );
-//    int srcIndex = 0;
-//    for( final SubInfo subInfo : fragInfo.subInfos ){
-//      for( final Toffs to : subInfo.termsOffsets ){
-//        fragment.append( src.substring( srcIndex, to.startOffset - s ) ).append( getPreTag( subInfo.seqnum ) )
-//          .append( src.substring( to.startOffset - s, to.endOffset - s ) ).append( getPostTag( subInfo.seqnum ) );
-//        srcIndex = to.endOffset - s;
-//      }
-//    }
-//    fragment.append( src.substring( srcIndex ) );
-//    return fragment.toString();
-//  }
-  
-	protected void addFragments( final StringBuilder buffer, final int[] index, final String[] values, final WeightedFragInfo fragInfo,
-			final List<String> fragments) throws IOException{
+	protected void addFragments( final StringBuilder buffer, final int[] index, final Field[] values,
+			final WeightedFragInfo fragInfo, final List<String> fragments) throws IOException{
 		int valuesIndex = index[0]; // idx for next value in values
 		int valueOffset = 0; // offset of current value
 		int valueCharIndex = 0; // idx for next char in value
 		OFFSET: if (fragInfo.startOffset > 0) {
 			while (valuesIndex < values.length) {
 				valueCharIndex = fragInfo.startOffset - valueOffset;
-				if (valueCharIndex <= values[valuesIndex].length()) {
+				if (valueCharIndex <= values[valuesIndex].stringValue().length()) {
 					break OFFSET;
 				}
-				valueOffset += values[valuesIndex++].length();
-				valueOffset ++;
+				if (values[valuesIndex].isTokenized()) {
+					valueOffset++;
+				}
+				valueOffset += values[valuesIndex++].stringValue().length();
 			}
 		}
 		if (valuesIndex >= values.length) {
@@ -126,29 +117,34 @@ public abstract class BaseFragmentsBuilder implements FragmentsBuilder {
 //		}
 		FRAGMENTS: for( final SubInfo subInfo : fragInfo.subInfos ){
 			for( final Toffs to : subInfo.termsOffsets ){
-				while (to.startOffset > valueOffset + values[valuesIndex].length()) {
+				while (to.startOffset > valueOffset + values[valuesIndex].stringValue().length()) {
 					if (buffer.length() > 0) {
-						buffer.append(values[valuesIndex].substring(valueCharIndex));
+						final String value = values[valuesIndex].stringValue();
+						buffer.append(value.substring(valueCharIndex));
 						fragments.add(buffer.toString());
 						buffer.setLength(0);
 					}
 					valueCharIndex = 0;
-					valueOffset += values[valuesIndex++].length();
-					valueOffset ++;
+					if (values[valuesIndex].isTokenized()) {
+						valueOffset++;
+					}
+					valueOffset += values[valuesIndex++].stringValue().length();
 					if (valuesIndex >= values.length) {
 						break FRAGMENTS;
 					}
 				}
-				append(buffer, values[valuesIndex], valueCharIndex, to.startOffset - valueOffset);
+				final String value = values[valuesIndex].stringValue();
+				append(buffer, value, valueCharIndex, to.startOffset - valueOffset);
 				buffer.append(getPreTag(subInfo.seqnum));
-				valueCharIndex = Math.min(to.endOffset - valueOffset, values[valuesIndex].length());
-				append(buffer, values[valuesIndex], to.startOffset - valueOffset, valueCharIndex);
+				valueCharIndex = Math.min(to.endOffset - valueOffset, value.length());
+				append(buffer, value, to.startOffset - valueOffset, valueCharIndex);
 				buffer.append(getPostTag(subInfo.seqnum));
 			}
 		}
 		if (buffer.length() > 0) {
-			append(buffer, values[valuesIndex], valueCharIndex,
-					Math.min(fragInfo.endOffset - valueOffset, values[valuesIndex].length()) );
+			final String value = values[valuesIndex].stringValue();
+			append(buffer, value, valueCharIndex,
+					Math.min(fragInfo.endOffset - valueOffset, value.length()) );
 			fragments.add(buffer.toString());
 			buffer.setLength(0);
 		}
@@ -159,22 +155,44 @@ public abstract class BaseFragmentsBuilder implements FragmentsBuilder {
 		buffer.append( value.substring( begin, end) );
 	}
 	
-  protected String getFragmentSource( final StringBuilder buffer, final int[] index, final String[] values,
-      final int startOffset, final int endOffset ){
-    while( buffer.length() < endOffset && index[0] < values.length ){
-      if( index[0] > 0 && values[index[0]].length() > 0 )
-        buffer.append( ' ' );
-      buffer.append( values[index[0]++] );
+  protected String makeFragment( StringBuilder buffer, int[] index, Field[] values, WeightedFragInfo fragInfo ){
+    final int s = fragInfo.startOffset;
+    return makeFragment( fragInfo, getFragmentSource( buffer, index, values, s, fragInfo.endOffset ), s );
+  }
+  
+  private String makeFragment( WeightedFragInfo fragInfo, String src, int s ){
+    StringBuilder fragment = new StringBuilder();
+    int srcIndex = 0;
+    for( SubInfo subInfo : fragInfo.subInfos ){
+      for( Toffs to : subInfo.termsOffsets ){
+        fragment.append( src.substring( srcIndex, to.startOffset - s ) ).append( getPreTag( subInfo.seqnum ) )
+          .append( src.substring( to.startOffset - s, to.endOffset - s ) ).append( getPostTag( subInfo.seqnum ) );
+        srcIndex = to.endOffset - s;
+      }
     }
-    final int eo = buffer.length() < endOffset ? buffer.length() : endOffset;
+    fragment.append( src.substring( srcIndex ) );
+    return fragment.toString();
+  }
+  
+  protected String getFragmentSource( StringBuilder buffer, int[] index, Field[] values,
+      int startOffset, int endOffset ){
+    while( buffer.length() < endOffset && index[0] < values.length ){
+      buffer.append( values[index[0]].stringValue() );
+      if( values[index[0]].isTokenized() && values[index[0]].stringValue().length() > 0 && index[0] + 1 < values.length )
+        buffer.append( ' ' );
+      index[0]++;
+    }
+    int eo = buffer.length() < endOffset ? buffer.length() : endOffset;
     return buffer.substring( startOffset, eo );
   }
   
   protected String getPreTag( final int num ){
-    return preTags.length > num ? preTags[num] : preTags[0];
+    int n = num % preTags.length;
+    return preTags[n];
   }
   
   protected String getPostTag( final int num ){
-    return postTags.length > num ? postTags[num] : postTags[0];
+    int n = num % postTags.length;
+    return postTags[n];
   }
 }
