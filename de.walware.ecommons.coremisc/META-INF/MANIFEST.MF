@@ -3,7 +3,7 @@ Bundle-ManifestVersion: 2
 Bundle-Vendor: WalWare.de
 Bundle-Name: Miscellany of ECommons Core Packages
 Bundle-SymbolicName: de.walware.ecommons.coremisc;singleton:=true
-Bundle-Version: 1.5.0.qualifier
+Bundle-Version: 1.5.0.b201406211200E38
 Bundle-Activator: de.walware.ecommons.coreutils.internal.CoreMiscellanyPlugin
 Bundle-ActivationPolicy: lazy
 Bundle-Localization: plugin

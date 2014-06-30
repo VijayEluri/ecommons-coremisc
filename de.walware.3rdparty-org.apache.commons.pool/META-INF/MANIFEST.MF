@@ -3,7 +3,7 @@ Bundle-ManifestVersion: 2
 Bundle-Vendor: WalWare.de
 Bundle-Name: Apache Commons Pool
 Bundle-SymbolicName: de.walware.3rdparty-org.apache.commons.pool
-Bundle-Version: 2.2.0.qualifier
+Bundle-Version: 2.2.0.b201406211200
 Bundle-ActivationPolicy: lazy
 Bundle-RequiredExecutionEnvironment: JavaSE-1.7
 Export-Package: org.apache.commons.pool2,
